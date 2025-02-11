@@ -155,6 +155,7 @@ def grid_sample(pred_score_map, down_rate=20, topk=512):
 
     return suction_scores_topk, idx0_topk, idx1_topk
 
+# Applies a Gaussian filter to smooth the suction scores.
 def drawGaussian(img, pt, score, sigma=1):
     """Draw 2d gaussian on input image.
     Parameters
@@ -199,6 +200,9 @@ def drawGaussian(img, pt, score, sigma=1):
     tmp_img[img_y[0]:img_y[1], img_x[0]:img_x[1]] = g
     img += tmp_img
 
+# Converts heatmap predictions into 3D suction points
+# Converts selected suction grasp pixels into 3D coordinates.
+# Uses Open3D for point cloud filtering and normal estimation.
 def get_suction_from_heatmap(depth_img, heatmap, camera_info):
     suction_scores, idx0, idx1 = grid_sample(heatmap, down_rate=10, topk=1024)
 
