@@ -73,12 +73,12 @@ model_map = {
         'convnet_resnet101': ConvNet.convnet_resnet101,
         'deeplabv3plus_resnet101_depth': network.deeplabv3plus_resnet101_depth
     }
-net = model_map[FLAGS.model](num_classes=FLAGS.num_classes, output_stride=FLAGS.output_stride)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-net = nn.DataParallel(net)
+net = model_map[FLAGS.model](num_classes=FLAGS.num_classes, output_stride=FLAGS.output_stride) # Loads the selected model from the network module
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") #  Moves the model to GPU (if available) using torch.device
+net = nn.DataParallel(net) # Wraps the model in DataParallel to use multiple GPUs.
 net.to(device)
    
-
+# Loads model weights from a checkpoint file
 EPOCH_CNT = 0
 if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     print('Loading model from:')
@@ -89,13 +89,15 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
 
     EPOCH_CNT = checkpoint['epoch']
 
+# Creates a uniform kernel for image processing
 def uniform_kernel(kernel_size):
     kernel = np.ones((kernel_size, kernel_size), dtype=np.float32)
     # center = kernel_size // 2
     kernel = kernel / kernel_size**2
 
     return kernel
-
+    
+# Stores intrinsic camera parameters needed for depth-to-point-cloud conversion
 class CameraInfo():
     def __init__(self, width, height, fx, fy, cx, cy, scale):
         self.width = width
@@ -106,6 +108,7 @@ class CameraInfo():
         self.cy = cy
         self.scale = scale
 
+# Converts a depth image into a 3D point cloud using camera intrinsic parameters
 def create_point_cloud_from_depth_image(depth, camera, organized=True):
     assert(depth.shape[0] == camera.height and depth.shape[1] == camera.width)
     xmap = np.arange(camera.width)
@@ -119,6 +122,10 @@ def create_point_cloud_from_depth_image(depth, camera, organized=True):
         cloud = cloud.reshape([-1, 3])
     return cloud
 
+# Grid Sampling (Finding Best Suction Points)
+# Divides the heatmap into smaller grids
+# Finds the highest scoring suction points in each grid.
+# Returns the top-k suction points.
 def grid_sample(pred_score_map, down_rate=20, topk=512):
     num_row = pred_score_map.shape[0] // down_rate
     num_col = pred_score_map.shape[1] // down_rate
