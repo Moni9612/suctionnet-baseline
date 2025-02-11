@@ -4,15 +4,15 @@ import time
 import numpy as np
 import open3d as o3d
 import torch.nn as nn
-import scipy.io as scio
+import scipy.io as scio # for reading .mat files
 import argparse
 import DeepLabV3Plus.network as network
 import ConvNet
-import torch.nn.functional as F
+import torch.nn.functional as F #For deep learning model implementation.
 from PIL import Image
 import cv2
 
-
+# initializes command-line arguments for controlling
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', default='deeplabv3plus_resnet101', help='Model file name [default: votenet]')
 parser.add_argument("--num_classes", type=int, default=2)
@@ -27,7 +27,7 @@ parser.add_argument('--overwrite', action='store_true', help='Overwrite existing
 parser.add_argument('--save_visu', action='store_true', help='whether to save visualizations.')
 FLAGS = parser.parse_args()
 
-
+# Stores user-defined command-line arguments for later use.
 LOG_DIR = FLAGS.log_dir
 CHECKPOINT_PATH = FLAGS.checkpoint_path
 SAVE_PATH = FLAGS.save_dir
@@ -62,7 +62,7 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-
+# A dictionary mapping model names to corresponding functions
 model_map = {
         'deeplabv3_resnet50': network.deeplabv3_resnet50,
         'deeplabv3plus_resnet50': network.deeplabv3plus_resnet50,
