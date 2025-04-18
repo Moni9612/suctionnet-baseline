@@ -11,6 +11,8 @@ import ConvNet
 import torch.nn.functional as F
 from PIL import Image
 import cv2
+import pandas as pd
+from scipy.spatial.transform import Rotation as R
 
 
 parser = argparse.ArgumentParser()
@@ -34,7 +36,6 @@ SAVE_PATH = FLAGS.save_dir
 split = FLAGS.split
 camera = FLAGS.camera
 dataset_root = FLAGS.dataset_root
-scene_list = []
 
 # # Prepare LOG_DIR and DUMP_DIR
 # if os.path.exists(LOG_DIR) and FLAGS.overwrite:
@@ -193,7 +194,8 @@ def drawGaussian(img, pt, score, sigma=1):
     img += tmp_img
 
 def get_suction_from_heatmap(depth_img, heatmap, camera_info):
-    suction_scores, idx0, idx1 = grid_sample(heatmap, down_rate=10, topk=1024)
+
+    suction_scores, idx0, idx1 = grid_sample(heatmap, down_rate=10, topk=50)
 
     if len(depth_img.shape) == 3:
         depth_img = depth_img[..., 0]
@@ -222,22 +224,27 @@ def get_suction_from_heatmap(depth_img, heatmap, camera_info):
 
     return suction_arr, idx0, idx1
 
+
 def inference_one_view(rgb_file, depth_file, meta_file, scene_idx, anno_idx):
-    
+    # Loading metadata and camera information
     meta = scio.loadmat(meta_file)
     intrinsics = meta['intrinsic_matrix']
-    fx, fy = intrinsics[0,0], intrinsics[1,1]
-    cx, cy = intrinsics[0,2], intrinsics[1,2]
+    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+    cx, cy = intrinsics[0, 2], intrinsics[1, 2]
     width = 1280
     height = 720
     s = 1000.0
     camera_info = CameraInfo(width, height, fx, fy, cx, cy, s)
 
+    # Reading RGB and depth images
     rgb = cv2.imread(rgb_file).astype(np.float32) / 255.0
     depth = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0
     rgb, depth = torch.from_numpy(rgb), torch.from_numpy(depth)
     
+    # Clamping depth values
     depth = torch.clamp(depth, 0, 1)
+
+    # Preparing RGB-D input
     if FLAGS.model == 'convnet_resnet101':
         depth = depth.unsqueeze(-1).repeat([1, 1, 3])
         rgbd = torch.cat([rgb, depth], dim=-1).unsqueeze(0)
@@ -249,6 +256,7 @@ def inference_one_view(rgb_file, depth_file, meta_file, scene_idx, anno_idx):
     rgbd = rgbd.permute(0, 3, 1, 2)
     rgbd = rgbd.to(device)
 
+    # Running inference
     net.eval()
     tic = time.time()
     with torch.no_grad():
@@ -257,20 +265,91 @@ def inference_one_view(rgb_file, depth_file, meta_file, scene_idx, anno_idx):
     toc = time.time()
     print('inference time:', toc - tic)
 
+    # Creating heatmap
     heatmap = (pred[0, 0] * pred[0, 1]).cpu().unsqueeze(0).unsqueeze(0)
     
     k_size = 15
     kernel = uniform_kernel(k_size)
     kernel = torch.from_numpy(kernel).unsqueeze(0).unsqueeze(0)
     heatmap = F.conv2d(heatmap, kernel, padding=(kernel.shape[2] // 2, kernel.shape[3] // 2)).squeeze().numpy()
-
+    # Getting suction data from heatmap and depth
     suctions, idx0, idx1 = get_suction_from_heatmap(depth.numpy(), heatmap, camera_info)
-    
-    save_dir = os.path.join(SAVE_PATH, split, 'scene_%04d'%scene_idx, camera, 'suction')
+
+    # Sorting by suction score (highest score gets ID 1)
+    suctions = suctions[np.argsort(-suctions[:, 0])]
+
+    # Saving .npz file
+    save_dir = os.path.join(SAVE_PATH, split, 'scene_%04d' % scene_idx, camera, 'suction')
     os.makedirs(save_dir, exist_ok=True)
-    suction_numpy_file = os.path.join(save_dir, '%04d.npz'%anno_idx)
+    suction_numpy_file = os.path.join(save_dir, '%04d.npz' % anno_idx)
     print('Saving:', suction_numpy_file)
     np.savez(suction_numpy_file, suctions)
+
+    # Extracting required data
+    suction_ids = np.arange(1, len(suctions) + 1)  # Assign Suction IDs
+    suction_scores = suctions[:, 0]  # Suction scores (used for sorting)
+    suction_normals = suctions[:, 1:4]  # Suction normal vectors
+    suction_points = suctions[:, 4:7]  # Suction point coordinates
+
+    # Convert suction normals to quaternions
+    quaternions = []
+    for normal in suction_normals:
+        # Assume normal is Z-axis, find rotation
+        rot_matrix = np.eye(3)
+        rot_matrix[:, 2] = normal / np.linalg.norm(normal)
+        rot_matrix[:, 0] = np.cross([0, 1, 0], rot_matrix[:, 2])
+        rot_matrix[:, 0] /= np.linalg.norm(rot_matrix[:, 0])
+        rot_matrix[:, 1] = np.cross(rot_matrix[:, 2], rot_matrix[:, 0])
+
+        B = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+        rot_matrix = np.dot(rot_matrix, B)
+        quat = R.from_matrix(rot_matrix).as_quat()
+        quaternions.append(quat)
+    quaternions = np.array(quaternions)
+
+    # Create a DataFrame
+    suction_data = {
+        'Grasp ID': suction_ids,
+        'Translation': [f'{x}, {y}, {z}' for x, y, z in suction_points],
+        'Quaternion': [f'{qx}, {qy}, {qz}, {qw}' for qx, qy, qz, qw in quaternions]
+    }
+    
+    suction_df = pd.DataFrame(suction_data)
+
+    # Define the save path and filename for CSV
+    suction_csv_file = os.path.join(save_dir, '%04d.csv' % anno_idx)
+
+    # Saving the DataFrame to CSV
+    print('Saving to CSV:', suction_csv_file)
+    suction_df.to_csv(suction_csv_file, index=False)
+
+    # Delete unnecessary files after saving CSV
+    data_dir_color = '/home/moniesha/suctionnet-baseline/neural_network/example_data/test_novel/scenes/scene_0160/realsense/rgb'
+    data_dir_depth = '/home/moniesha/suctionnet-baseline/neural_network/example_data/test_novel/scenes/scene_0160/realsense/depth'
+    data_dir_meta = '/home/moniesha/suctionnet-baseline/neural_network/example_data/test_novel/scenes/scene_0160/realsense/meta'
+    filename = '0000.png'
+    file_path = os.path.join(data_dir_color, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        print(f"Deleted file: {file_path}")
+    else:
+        print(f"File not found, skipping: {file_path}")
+
+    filename = '0000.png'
+    file_path = os.path.join(data_dir_depth, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        print(f"Deleted file: {file_path}")
+    else:
+        print(f"File not found, skipping: {file_path}")
+
+    filename = '0000.mat'
+    file_path = os.path.join(data_dir_meta, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        print(f"Deleted file: {file_path}")
+    else:
+        print(f"File not found, skipping: {file_path}")
 
     if anno_idx < 3 and FLAGS.save_visu:
         rgb_img = rgbd[0].permute(1, 2, 0)[..., :3].cpu().numpy()
@@ -334,37 +413,23 @@ def inference_one_view(rgb_file, depth_file, meta_file, scene_idx, anno_idx):
         print('saving:', sampled_file)
         sampled_img.save(sampled_file)      
 
-
+      
 def inference(scene_idx):
     
-    for anno_idx in range(256):
+    rgb_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
+    depth_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
+    # segmask_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/kinect/label/{:04d}.png'.format(scene_idx, anno_idx))
+    meta_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
 
-        rgb_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
-        depth_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
-        # segmask_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/kinect/label/{:04d}.png'.format(scene_idx, anno_idx))
-        meta_file = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
-
-        inference_one_view(rgb_file, depth_file, meta_file, scene_idx, anno_idx)
+    inference_one_view(rgb_file, depth_file, meta_file, scene_idx, anno_idx)
 
 if __name__ == "__main__":
     
-    scene_list = []
-    if split == 'test':
-        for i in range(100, 190):
-            scene_list.append(i)
-    if split == 'test_seen':
-        for i in range(100, 130):
-            scene_list.append(i)
-    elif split == 'test_similiar':
-        for i in range(130, 160):
-            scene_list.append(i)
-    elif split == 'test_novel':
-        for i in range(160, 190):
-            scene_list.append(i)
+    if split == 'test_novel':
+        scene_idx = 160
+        anno_idx = 0
     else:
         print('invalid split')
     
-    for scene_idx in scene_list:
-        inference(scene_idx)
+    inference(scene_idx)
     
-
