@@ -139,5 +139,5 @@ if you find our work useful, please cite
   doi={10.1109/LRA.2021.3115406}}
 ```
 
-## Add example_data folder to the directory suctionnet-baseline/neural_network/example_data
+## Add example_data folder to the directory suctionnet-baseline/neural_network/example_data (semester3-graspbenchmarking)
 
